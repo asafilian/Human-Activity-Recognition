@@ -1,0 +1,277 @@
+---
+title: "A Predictor for Human Activity Recognition"
+author: "Ali Safilian"
+date: "February 25, 2019"
+output: 
+        html_document:
+                number_sections: yes
+                fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, comment="")
+```
+
+# Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, our goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available on http://groupware.les.inf.puc-rio.br/har. The goal of this project is to predict the manner in which they did the exercise. 
+
+The data for this project come from an article written  by W. Ugulino *et al*.^[http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har - Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6]. 
+
+In [Sect. 1](#sec-data), we split the data into training and testing datasets.  
+
+
+
+
+
+# Data {#sec-data}
+```{r, echo=FALSE}
+library(caret)
+library(ggplot2)
+library(RANN)
+library(dplyr)
+library(corrplot)
+```
+
+ Two datasets are available, `pml-training.csv` and `pml-testing.csv`. We use the former for training, and save it as `dataset`. The latter is used for validation of the model, and we load it to a variable called `validation`. In addition, we split `dataset` to two sets, `train.set` and `test.set`. We build our models on `train.set` and test whether it overfits or not on `test.set`.
+
+```{r getdata, cache=TRUE}
+dataset <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"), header=T, na.strings=c("","NA"))
+```
+
+```{r split}
+set.seed(2)
+inTrain <- createDataPartition(dataset$classe, p = 0.7, list = FALSE)
+train.set <- dataset[inTrain, ]
+test.set <- dataset[-inTrain, ]
+dim(test.set)
+dim(train.set) 
+```
+
+As we see, the dataset has `r dim(train.set)[2]` variables. The output of our predictors is the `classe` variable in our dataset, which is a categorical variable with the following levels `r levels(train.set$classe)`.  Now, let's take a look at the `classe` (the output) variable:
+
+```{r perc-classe}
+percentage <- prop.table(table(train.set$classe)) * 100
+cbind(freq=table(train.set$classe), percentage=round(percentage, 2))
+```
+
+# Preprocessing
+In this section, we do preprocessing on `train.set`. We save the preprocessed data into a variable called `train.set.proc`. 
+
+
+Let's first take a look at the first two variables of the dataset:
+
+```{r}
+str(train.set[, 1:2])
+length(unique(train.set[, 1])) == dim(train.set)[1]
+```
+
+We must remove the first variable, as it is just an ID for the observatios. The second variable is username. If we include it in our model, then it will be a prediction for a limited number of people. Therefore, we exclude these two variables from our training set. 
+```{r}
+train.set.proc <- train.set %>% select(-c(1, 2))
+```
+
+Now, we are going to remove the varaibles that have more than 50% missing values. Let us first see which variables have missing values. In the following script, we save extract all variables that have NA values and save their indices in the `ids_NA.1` varible. 
+
+```{r whichNA}
+whichNA <- function(dat){
+        inds <- NULL
+        for(i in 1:dim(dat)[2]){
+                if(anyNA(dat[, i])){
+                      inds <- c(inds, i)  
+                }
+        }
+        inds
+}
+ids_NA.1 <- whichNA(train.set.proc)
+m <- NULL
+for(i in 1: length(ids_NA.1)){
+        m <- c(m, mean(is.na(train.set.proc[, ids_NA.1[i]])))
+}
+unique(m)
+```
+
+So, there are `r length(ids_NA.1)` variables out of `r dim(train.set.proc)[2]` variabels which have some missing values. As we see above, for each of these variables, about `r round(unique(m), 2)*100`% of its values is missing. Since our training set is a very large data set with many other varaibels, it does not make sense to impute these variables with NA values and keep them as predictors.  Therefore, we simply discard these variables as follows:
+
+```{r preproc-NA}
+train.set.proc <- train.set.proc[, -ids_NA.1]
+sum(colSums(is.na(train.set.proc)))
+dim(train.set.proc)
+```
+
+Now, there is no NA values in any columns of the training data set, we got `r  dim(train.set.proc)[2]` variables.
+
+Now, we normalize the numeric variables in the training set. We use the methods  `YeoJohnson`, `center`, and `scale`. The YeoJohnson method make the data look more normal.^[We could use the Box-Cox method, but the Box-Cox method does not work when you have negative values.] 
+
+```{r preproc-normal}
+is.fact.2 <- sapply(train.set.proc, is.factor)
+num_inds.2 <- which(!is.fact.2)
+preObj_stn <- preProcess(train.set.proc[, num_inds.2], method = c("YeoJohnson", "center", "scale"))
+stan_data <- predict(preObj_stn, train.set.proc[, num_inds.2])
+train.set.proc[, num_inds.2] <- stan_data
+```
+
+
+Let us extract the variables with near zero variability:
+
+```{r zerovar}
+isN0 <- nearZeroVar(train.set.proc, saveMetrics = TRUE)$nzv
+colnames(train.set.proc)[isN0]
+```
+
+As we see above, there is only one variable, `r colnames(train.set.proc)[isN0]`, in the training set with near zero variability. We are going to exclude it from our dataset: 
+
+```{r preproc-zerovar}
+train.set.proc <- train.set.proc[, !isN0]
+is.fact.3 <- sapply(train.set.proc, is.factor)
+num_inds.3 <- which(!is.fact.3)
+```
+
+Now, let us take a look at the correlation between the numeric variables. Here, using by the `corrplot` package, we plot the correlations. 
+
+```{r corplot}
+cors <- cor(train.set.proc[, num_inds.3])
+diag(cors) <- 0
+corrplot(cors, order = "hclust", title = title("Correlation Plot", line = -25))
+```
+
+
+We now exclude the variables with high correlations (with `cutoff` 0.75) from the dataset. To this end, we take advantage of the `findCorrelation` function to searche through the correlation matrix and returns the indices of the corresponding variables. 
+
+```{r preproc-cor}
+highCorr <- findCorrelation(cors, cutoff=0.75)
+num_cor <- length(highCorr)
+train.set.proc <- train.set.proc[, -highCorr]
+is.fact.4 <- sapply(train.set.proc, is.factor)
+num_inds.4 <- which(!is.fact.4)
+dim(train.set.proc)
+```
+
+So, `r num_cor` variables were removed to reduce the pair-wise correlations. 
+
+
+Now, we would like to preprocess the data with the PCA method. We are going to get 95% of the variance of the data, which is the default `thresh`^[A cutoff for the cumulative percent of variance to be retained by PCA] for precessoning with PCA in the `preProcess` function. We save the result in  a datset variable called `train.proc.pca`: 
+
+```{r preproc-pca}
+preObj_pca <- preProcess(train.set.proc[, -dim(train.set.proc)[2]], method = "pca")
+train.proc.pca <- predict(preObj_pca, train.set.proc[, -dim(train.set.proc)[2]])
+train.proc.pca$classe <- train.set$classe
+dim(train.proc.pca)
+```
+
+Now, we got `r preObj_pca$numComp` principal components, the original variable `cvtd_timestamp`, and the output variable `classe` in our dataset. Let us just take a look at the `cvtd_timestamp` varaible:  
+
+```{r cvtd_timestamp}
+percentage <- prop.table(table(train.proc.pca$cvtd_timestamp)) * 100
+cbind(freq=table(dataset$cvtd_timestamp), percentage=round(percentage, 2))
+```
+
+# Building Models
+Now, it is time to build our model. In this section, we are going to get a reasonable model. To this end, we will try several models.
+
+
+We are going to use *10-fold crossvalidation* to estimate the accuracy of our models.^[This will split our dataset into 10 parts, train in 9 and test on 1 and release for all combinations of train-test splits.] Moreover, we define a variable `metric` and set it to `Accuracy`. This will be the meric to evaluate models.  
+
+```{r train-control}
+control <- trainControl(method="cv", number=10)
+metric <- "Accuracy"
+```
+
+We are going to evaluate five different algorithms, including 
+
+- Linear Discriminant Analysis 
+- Classification Trees 
+- k-Nearest Neighbors 
+- Support Vector Machines (SVM) with a non-linear kernel 
+- Random Forests 
+
+This is a good mixture of simple linear (LDA), nonlinear (CART, kNN) and complex nonlinear methods (SVM, RF). We reset the random number seed before reach run to ensure that the evaluation of each algorithm is performed using exactly the same data splits. 
+
+```{r lda, cache=TRUE}
+# LDA: linear
+set.seed(123)
+fit.lda <- train(classe~., data=train.proc.pca, method="lda", metric=metric, trControl=control)
+```
+
+```{r cart, cache=TRUE}
+# CART: nonlinear
+set.seed(123)
+fit.cart <- train(classe~., data=train.proc.pca, method="rpart", metric=metric, trControl=control)
+```
+
+```{r knn, cache=TRUE}
+# kNN
+set.seed(123)
+fit.knn <- train(classe~., data=train.proc.pca, method="knn", metric=metric, trControl=control)
+```
+
+```{r svm, cache=TRUE}
+# SVM: advanced
+set.seed(123)
+fit.svm <- train(classe~., data=train.proc.pca, method="svmRadial", metric=metric, trControl=control)
+```
+
+```{r rf, cache=TRUE}
+# Random Forest: advanced
+set.seed(123)
+fit.rf <- train(classe~., data=train.proc.pca, method="rf", metric=metric, trControl=control)
+```
+
+
+Now, we need to compare the models and select the most accurate one. In the following we see the summary of the above models:
+
+```{r models}
+# summarize accuracy of models
+results <- resamples(list(lda=fit.lda, 
+                          cart=fit.cart, 
+                          knn=fit.knn, 
+                          svm=fit.svm, 
+                          rf=fit.rf))
+summary(results)
+```
+
+The following plot represents the model evaluation results and compare the spread and the mean accuracy of each model. Sine each algorithm was evaluated 10 times (10 fold cross validation), there is a population of accuracy measures for each algorithm.   
+
+```{r models-accuracy}
+dotplot(results)
+```
+
+We can see that the most accurate models in this case were random forests and KNN. The former is a little bit more accurate than KNN. Let us take a look at the randome forests model:
+
+```{r rf-summary}
+print(fit.rf)
+```
+
+Although, random forests provide use the most accuracte model. However, it may over-fit. To see if this is the case, we are going to predict it on our testing set `test.set`. We first need to preprocess `test.set` based on the preprocessing we got for training set. 
+
+```{r preproc-test.set}
+test.set.proc <- test.set %>% select(-c(1, 2))
+test.set.proc <- test.set.proc[, -ids_NA.1]
+stan.data.test <- predict(preObj_stn, test.set.proc[, num_inds.2])
+test.set.proc[, num_inds.2] <- stan.data.test
+test.set.proc <- test.set.proc[, !isN0]
+test.set.proc <- test.set.proc[, -highCorr]
+test.set.proc$classe <- test.set$classe
+test.proc.pca <- predict(preObj_pca, test.set.proc[, -dim(test.set.proc)[2]])
+```
+
+NOW, confusion matrix
+```{r confusion}
+pred.test <- predict(fit.rf, test.proc.pca)
+confusionMatrix(pred.test, test.set$classe)
+```
+
+As we see, we get about 98% accuracy, which shows that our random forests model work pretty well. This well represented in the following plot.
+```{r predicted-value-test}
+qplot(classe, pred.test, data = test.set, xlab = "Actual Value", ylab = "Predicted Value", main = "Predicted vs. Actual", geom = "jitter")
+```
+
+
+
+
+
+
+
+
+
